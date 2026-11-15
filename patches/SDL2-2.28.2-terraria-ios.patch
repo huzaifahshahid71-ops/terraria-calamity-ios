@@ -1,0 +1,424 @@
+diff --git a/src/video/uikit/SDL_uikitappdelegate.m b/src/video/uikit/SDL_uikitappdelegate.m
+index 1e27200..ab7c78c 100644
+--- a/src/video/uikit/SDL_uikitappdelegate.m
++++ b/src/video/uikit/SDL_uikitappdelegate.m
+@@ -50,8 +50,55 @@
+ static char **forward_argv;
+ static int exit_status;
+ 
++void SDL_UIKit_Trace(const char *what);
++static void SDL_UIKit_AtExit(void);
++int SDL_UIKitRunApp(int argc, char *argv[], SDL_main_func mainFunction);
++#include <dlfcn.h>
++#include <stdlib.h>
++/* v29 renderer selection (Terraria port). Metal = FNA3D Vulkan driver on the bundled MoltenVK.framework.
++ * Crash guard: TPMetalPending is set before a Metal launch and cleared by the overlay after ~20 s of running;
++ * if a Metal launch never confirms, the next launch uses OpenGL ES and the setting reverts to OpenGL. */
++static void TP_ConfigureRenderer(void)
++{
++    @autoreleasepool {
++        NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
++        /* v31: capture native stderr (MoltenVK / FNA3D / SDL diagnostics) to Documents/native-stderr.txt each launch */
++        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
++        if (docs) { freopen([[docs stringByAppendingPathComponent:@"native-stderr.txt"] UTF8String], "w", stderr); setvbuf(stderr, NULL, _IOLBF, 0); }
++        setenv("MVK_CONFIG_LOG_LEVEL", "2", 0); /* warnings and errors */
++        setenv("TP_BAKED_IL", ([d objectForKey:@"TPBakedIL"] && ![d boolForKey:@"TPBakedIL"]) ? "0" : "1", 1); /* gear menu: AOT Calamity edits */
++        setenv("TP_LAZY_TEXTURES", ([d objectForKey:@"TPLazyTextures"] && ![d boolForKey:@"TPLazyTextures"]) ? "0" : "1", 1); /* gear menu: Low-memory textures */
++        NSString *renderer = [d stringForKey:@"TPRenderer"] ?: @"metal";
++        BOOL hud = [d objectForKey:@"TPMetalHUD"] ? [d boolForKey:@"TPMetalHUD"] : YES;
++        NSString *mvk = nil; Dl_info info;
++        if (dladdr((const void *) &SDL_UIKitRunApp, &info) && info.dli_fname) {
++            NSString *frameworks = [[@(info.dli_fname) stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
++            mvk = [frameworks stringByAppendingPathComponent:@"MoltenVK.framework/MoltenVK"];
++        }
++        BOOL haveMVK = mvk && [NSFileManager.defaultManager fileExistsAtPath:mvk];
++        if ([d boolForKey:@"TPMetalPending"]) {
++            [d setBool:NO forKey:@"TPMetalPending"]; [d setObject:@"opengl" forKey:@"TPRenderer"]; [d synchronize];
++            renderer = @"opengl";
++            SDL_UIKit_Trace("renderer: previous Metal launch never confirmed -> OpenGL ES (re-enable Metal in the gear menu)");
++        }
++        if ([renderer isEqualToString:@"metal"] && haveMVK) {
++            setenv("SDL_VULKAN_LIBRARY", mvk.UTF8String, 1);
++            setenv("FNA3D_FORCE_DRIVER", "Vulkan", 1);
++            if (hud) setenv("MTL_HUD_ENABLED", "1", 1);
++            [d setBool:YES forKey:@"TPMetalPending"]; [d synchronize];
++            SDL_UIKit_Trace([[NSString stringWithFormat:@"renderer: Metal (FNA3D Vulkan on MoltenVK %@) hud=%d", mvk, hud] UTF8String]);
++        } else {
++            setenv("FNA3D_FORCE_DRIVER", "OpenGL", 1);
++            SDL_UIKit_Trace([[NSString stringWithFormat:@"renderer: OpenGL ES (setting=%@ moltenvk=%d)", renderer, haveMVK] UTF8String]);
++        }
++    }
++}
++
+ int SDL_UIKitRunApp(int argc, char *argv[], SDL_main_func mainFunction)
+ {
++    atexit(SDL_UIKit_AtExit);
++    SDL_UIKit_Trace("SDL_UIKitRunApp entered");
++    TP_ConfigureRenderer();
+     int i;
+ 
+     /* store arguments */
+@@ -343,6 +390,85 @@ - (NSUInteger)supportedInterfaceOrientations
+ 
+ @end
+ 
++/* Port diagnostics: append a line to Documents/sdl-trace.txt (survives silent exits). */
++void SDL_UIKit_Trace(const char *what)
++{
++    @autoreleasepool {
++        NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
++        if (!dir) { return; }
++        NSString *line = [NSString stringWithFormat:@"%@ %s\n", [NSDate date], what];
++        NSString *path = [dir stringByAppendingPathComponent:@"sdl-trace.txt"];
++        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
++        if (!h) { [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil]; h = [NSFileHandle fileHandleForWritingAtPath:path]; }
++        [h seekToEndOfFile]; [h writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [h closeFile];
++    }
++}
++static void SDL_UIKit_AtExit(void) { SDL_UIKit_Trace("process exit()"); }
++
++/* ---- UIScene lifecycle support (iOS 27 traps apps without it). Added for the Terraria/tModLoader iOS port. ---- */
++UIWindowScene *SDL_UIKit_activeScene API_AVAILABLE(ios(13.0)) = nil;
++static BOOL SDL_UIKit_usesScenes = NO;
++static BOOL SDL_UIKit_mainStarted = NO;
++
++void SDL_UIKit_AttachWindowToScene(UIWindow *window)
++{
++    if (@available(iOS 13.0, tvOS 13.0, *)) {
++        if (window != nil && SDL_UIKit_activeScene != nil && window.windowScene != SDL_UIKit_activeScene) {
++            window.windowScene = SDL_UIKit_activeScene;
++        }
++        if (window != nil && window.windowScene != nil) {
++            /* UIScreen.bounds can still describe portrait inside a landscape host.
++             * A scene-attached window must fill the scene's own coordinate space. */
++            CGRect bounds = window.windowScene.coordinateSpace.bounds;
++            if (!CGRectEqualToRect(window.frame, bounds)) window.frame = bounds;
++            SDL_UIKit_Trace([[NSString stringWithFormat:@"scene window frame=%@ scene=%@", NSStringFromCGRect(window.frame), NSStringFromCGRect(bounds)] UTF8String]);
++        }
++    }
++}
++
++@interface SDLUIKitSceneDelegate : UIResponder <UIWindowSceneDelegate>
++@property (nonatomic, strong) UIWindow *window;
++@end
++
++/* Exported: called by SDLUIKitSceneDelegate, or by a host-provided scene delegate (e.g. when the app runs inside
++ * LiveContainer, which connects scenes using the guest Info.plist delegate rather than the app delegate's configuration). */
++DECLSPEC void SDLCALL SDL_UIKit_SceneDidConnect(void *sceneptr)
++{
++    if (@available(iOS 13.0, tvOS 13.0, *)) {
++        UIScene *scene = (__bridge UIScene *)sceneptr;
++        if (![scene isKindOfClass:[UIWindowScene class]]) {
++            SDL_UIKit_Trace("SceneDidConnect: not a UIWindowScene");
++            return;
++        }
++        SDL_UIKit_activeScene = (UIWindowScene *)scene;
++        SDL_UIKit_Trace("SceneDidConnect");
++        for (UIWindow *w in [UIApplication sharedApplication].windows) {
++            SDL_UIKit_AttachWindowToScene(w);
++        }
++        if (!SDL_UIKit_mainStarted) {
++            SDL_UIKit_mainStarted = YES;
++            id del = [UIApplication sharedApplication].delegate;
++            if ([del respondsToSelector:@selector(postFinishLaunch)]) {
++                [del performSelector:@selector(postFinishLaunch) withObject:nil afterDelay:0.0];
++            } else {
++                /* host app delegate is not SDL's (LiveContainer): run SDL's launch path on a fresh SDL delegate instance */
++                SDL_UIKit_Trace("SceneDidConnect: app delegate is not SDL's; using private SDLUIKitDelegate instance");
++                static SDLUIKitDelegate *sdlDelegate = nil;
++                sdlDelegate = [[SDLUIKitDelegate alloc] init];
++                [sdlDelegate performSelector:@selector(postFinishLaunch) withObject:nil afterDelay:0.0];
++            }
++        }
++    }
++}
++
++@implementation SDLUIKitSceneDelegate
++- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions API_AVAILABLE(ios(13.0))
++{
++    SDL_UIKit_Trace("scene willConnectToSession");
++    SDL_UIKit_SceneDidConnect((__bridge void *)scene);
++}
++@end
++
+ @implementation SDLUIKitDelegate {
+     UIWindow *launchWindow;
+ }
+@@ -384,13 +510,16 @@ - (void)hideLaunchScreen
+ 
+ - (void)postFinishLaunch
+ {
++    SDL_UIKit_Trace("postFinishLaunch");
+     /* Hide the launch screen the next time the run loop is run. SDL apps will
+      * have a chance to load resources while the launch screen is still up. */
+     [self performSelector:@selector(hideLaunchScreen) withObject:nil afterDelay:0.0];
+ 
+     /* run the user's application, passing argc and argv */
+     SDL_iPhoneSetEventPump(SDL_TRUE);
++    SDL_UIKit_Trace("calling forward_main");
+     exit_status = forward_main(forward_argc, forward_argv);
++    SDL_UIKit_Trace("forward_main returned");
+     SDL_iPhoneSetEventPump(SDL_FALSE);
+ 
+     if (launchWindow) {
+@@ -406,6 +535,7 @@ - (void)postFinishLaunch
+ 
+ - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
+ {
++    SDL_UIKit_Trace("didFinishLaunching begin");
+     NSBundle *bundle = [NSBundle mainBundle];
+ 
+ #if SDL_IPHONE_LAUNCHSCREEN
+@@ -443,6 +573,7 @@ - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(
+ 
+     if (vc.view) {
+         launchWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
++        SDL_UIKit_AttachWindowToScene(launchWindow);
+ 
+         /* We don't want the launch window immediately hidden when a real SDL
+          * window is shown - we fade it out ourselves when we're ready. */
+@@ -464,11 +595,26 @@ - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(
+                         SDL_IdleTimerDisabledChanged, NULL);
+ 
+     SDL_SetMainReady();
+-    [self performSelector:@selector(postFinishLaunch) withObject:nil afterDelay:0.0];
++    if ([bundle objectForInfoDictionaryKey:@"UIApplicationSceneManifest"] == nil) {
++        /* classic app-delegate lifecycle */
++        SDL_UIKit_mainStarted = YES;
++        [self performSelector:@selector(postFinishLaunch) withObject:nil afterDelay:0.0];
++    } /* else: SDLUIKitSceneDelegate starts it once the window scene is connected */
++    SDL_UIKit_Trace([bundle objectForInfoDictionaryKey:@"UIApplicationSceneManifest"] ? "didFinishLaunching end (scene manifest: waiting for scene)" : "didFinishLaunching end (classic)");
+ 
+     return YES;
+ }
+ 
++- (UISceneConfiguration *)application:(UIApplication *)application configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession options:(UISceneConnectionOptions *)options API_AVAILABLE(ios(13.0))
++{
++    SDL_UIKit_usesScenes = YES;
++    SDL_UIKit_Trace("configurationForConnectingSceneSession");
++    UISceneConfiguration *config = [[UISceneConfiguration alloc] initWithName:@"SDL" sessionRole:connectingSceneSession.role];
++    config.delegateClass = [SDLUIKitSceneDelegate class];
++    config.sceneClass = [UIWindowScene class];
++    return config;
++}
++
+ - (UIWindow *)window
+ {
+     SDL_VideoDevice *_this = SDL_GetVideoDevice();
+diff --git a/src/video/uikit/SDL_uikitmessagebox.m b/src/video/uikit/SDL_uikitmessagebox.m
+index 03e3f38..685defb 100644
+--- a/src/video/uikit/SDL_uikitmessagebox.m
++++ b/src/video/uikit/SDL_uikitmessagebox.m
+@@ -25,6 +25,7 @@
+ #include "SDL.h"
+ #include "SDL_uikitvideo.h"
+ #include "SDL_uikitwindow.h"
++extern void SDL_UIKit_AttachWindowToScene(UIWindow *window);
+ 
+ /* Display a UIKit message box */
+ 
+@@ -100,6 +101,7 @@ static BOOL UIKit_ShowMessageBoxAlertController(const SDL_MessageBoxData *messag
+ 
+     if (window == nil || window.rootViewController == nil) {
+         alertwindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
++        SDL_UIKit_AttachWindowToScene(alertwindow);
+         alertwindow.rootViewController = [UIViewController new];
+         alertwindow.windowLevel = UIWindowLevelAlert;
+ 
+diff --git a/src/video/uikit/SDL_uikitmodes.m b/src/video/uikit/SDL_uikitmodes.m
+index e60bada..f7ee2a3 100644
+--- a/src/video/uikit/SDL_uikitmodes.m
++++ b/src/video/uikit/SDL_uikitmodes.m
+@@ -350,7 +350,10 @@ SDL_bool UIKit_IsDisplayLandscape(UIScreen *uiscreen)
+ {
+ #if !TARGET_OS_TV
+     if (uiscreen == [UIScreen mainScreen]) {
+-        return UIInterfaceOrientationIsLandscape([UIApplication sharedApplication].statusBarOrientation);
++        /* Terraria port: landscape-only app. statusBarOrientation is deprecated and reports portrait under
++         * LiveContainer, which made display modes portrait (Terraria's resolution list became empty and the
++         * Video settings menu divided by zero). */
++        return SDL_TRUE;
+     } else
+ #endif /* !TARGET_OS_TV */
+     {
+diff --git a/src/video/uikit/SDL_uikitvideo.m b/src/video/uikit/SDL_uikitvideo.m
+index 8b16c23..b737017 100644
+--- a/src/video/uikit/SDL_uikitvideo.m
++++ b/src/video/uikit/SDL_uikitvideo.m
+@@ -213,9 +213,10 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
+      * https://bugzilla.libsdl.org/show_bug.cgi?id=3505
+      * https://bugzilla.libsdl.org/show_bug.cgi?id=3465
+      * https://forums.developer.apple.com/thread/65337 */
+-    UIInterfaceOrientation orient = [UIApplication sharedApplication].statusBarOrientation;
+-    BOOL landscape = UIInterfaceOrientationIsLandscape(orient) ||
+-                    !(UIKit_GetSupportedOrientations(window) & (UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown));
++    /* Terraria port: landscape-only. statusBarOrientation reports portrait under LiveContainer and FNA's orientation
++     * hint may include portrait, which made this function swap the correct landscape frame to portrait whenever
++     * the keyboard appeared (updateKeyboard) -> game squeezed into a 402 pt wide column. */
++    BOOL landscape = YES;
+     BOOL fullscreen = CGRectEqualToRect(screen.bounds, frame);
+ 
+     /* The orientation flip doesn't make sense when the window is smaller
+diff --git a/src/video/uikit/SDL_uikitviewcontroller.m b/src/video/uikit/SDL_uikitviewcontroller.m
+index b9ccf6b..91c3b8b 100644
+--- a/src/video/uikit/SDL_uikitviewcontroller.m
++++ b/src/video/uikit/SDL_uikitviewcontroller.m
+@@ -35,6 +35,9 @@
+ #include "SDL_uikitwindow.h"
+ #include "SDL_uikitopengles.h"
+ 
++extern void SDL_UIKit_Trace(const char *what);
++#include "SDL_terraria_overlay.h"
++
+ #if TARGET_OS_TV
+ static void SDLCALL
+ SDL_AppleTVControllerUIHintChanged(void *userdata, const char *name, const char *oldValue, const char *hint)
+@@ -65,6 +68,7 @@
+ #endif
+ 
+ @implementation SDL_uikitviewcontroller {
++    TPTouchOverlay *terrariaOverlay;
+     CADisplayLink *displayLink;
+     int animationInterval;
+     void (*animationCallback)(void*);
+@@ -113,6 +117,7 @@ - (instancetype)initWithSDLWindow:(SDL_Window *)_window
+ 
+ - (void)dealloc
+ {
++    [terrariaOverlay shutdown];
+ #if SDL_IPHONE_KEYBOARD
+     [self deinitKeyboard];
+ #endif
+@@ -197,13 +202,32 @@ - (void)viewDidLayoutSubviews
+     int w = (int) size.width;
+     int h = (int) size.height;
+ 
++    /* Terraria port: the game is landscape-only. iOS screenshots (and launch transitions) briefly lay the view out
++     * portrait or at tiny placeholder sizes; forwarding those makes FNA rebuild its backbuffer/swapchain twice
++     * (frame-time spikes, squeezed frames). Ignore them; the following landscape layout is forwarded normally. */
++    if (h > w || w < 320 || h < 200) {
++        SDL_UIKit_Trace([[NSString stringWithFormat:@"ignored transient layout %dx%d", w, h] UTF8String]);
++        return;
++    }
+     SDL_SendWindowEvent(window, SDL_WINDOWEVENT_RESIZED, w, h);
+ }
+ 
+ #if !TARGET_OS_TV
+ - (NSUInteger)supportedInterfaceOrientations
+ {
+-    return UIKit_GetSupportedOrientations(window);
++    return UIInterfaceOrientationMaskLandscape;
++}
++
++- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation { return UIInterfaceOrientationLandscapeRight; }
++
++- (void)viewDidAppear:(BOOL)animated
++{
++    [super viewDidAppear:animated];
++    if (@available(iOS 16.0, *)) {
++        [self setNeedsUpdateOfSupportedInterfaceOrientations];
++        UIWindowScene *scene=self.view.window.windowScene;
++        if(scene) [scene requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskLandscape] errorHandler:^(NSError *error){ SDL_UIKit_Trace(error.description.UTF8String); }];
++    }
+ }
+ 
+ - (BOOL)prefersStatusBarHidden
+@@ -271,7 +295,15 @@ - (void)initKeyboard
+     textField.enablesReturnKeyAutomatically = NO;
+     textField.keyboardAppearance = UIKeyboardAppearanceDefault;
+     textField.keyboardType = UIKeyboardTypeDefault;
+-    textField.returnKeyType = UIReturnKeyDefault;
++    textField.returnKeyType = UIReturnKeyDone;
++#if !TARGET_OS_TV
++    UIToolbar *toolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 320, 44)];
++    toolbar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
++    UIBarButtonItem *space = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil];
++    UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(commitKeyboard:)];
++    toolbar.items = @[space, done];
++    textField.inputAccessoryView = toolbar;
++#endif
+     textField.secureTextEntry = NO;
+ 
+     textField.hidden = YES;
+@@ -334,9 +366,13 @@ - (void)handleCommand:(UIKeyCommand *)keyCommand
+ 
+ - (void)setView:(UIView *)view
+ {
++    [terrariaOverlay shutdown];
++    [terrariaOverlay removeFromSuperview];
++    terrariaOverlay=nil;
+     [super setView:view];
+ 
+     [view addSubview:textField];
++    if(view && window) { terrariaOverlay=[[TPTouchOverlay alloc] initWithSDLWindow:window]; terrariaOverlay.frame=view.bounds; [view addSubview:terrariaOverlay]; }
+ 
+     if (keyboardVisible) {
+         [self showKeyboard];
+@@ -536,14 +572,18 @@ - (BOOL)textField:(UITextField *)_textField shouldChangeCharactersInRange:(NSRan
+ }
+ 
+ /* Terminates the editing session */
+-- (BOOL)textFieldShouldReturn:(UITextField*)_textField
++- (void)commitKeyboard:(id)sender
+ {
++    SDL_UIKit_Trace("keyboard Done -> Return + stop text input");
+     SDL_SendKeyboardKeyAutoRelease(SDL_SCANCODE_RETURN);
+-    if (keyboardVisible &&
+-        SDL_GetHintBoolean(SDL_HINT_RETURN_KEY_HIDES_IME, SDL_FALSE)) {
+-         SDL_StopTextInput();
+-    }
+-    return YES;
++    SDL_StopTextInput();
++    [self hideKeyboard];
++}
++
++- (BOOL)textFieldShouldReturn:(UITextField*)_textField
++{
++    [self commitKeyboard:nil];
++    return NO;
+ }
+ 
+ #endif
+diff --git a/src/video/uikit/SDL_uikitwindow.m b/src/video/uikit/SDL_uikitwindow.m
+index d696179..4550ec8 100644
+--- a/src/video/uikit/SDL_uikitwindow.m
++++ b/src/video/uikit/SDL_uikitwindow.m
+@@ -35,6 +35,7 @@
+ #include "SDL_uikitevents.h"
+ #include "SDL_uikitmodes.h"
+ #include "SDL_uikitwindow.h"
++extern void SDL_UIKit_AttachWindowToScene(UIWindow *window);
+ #import "SDL_uikitappdelegate.h"
+ 
+ #import "SDL_uikitview.h"
+@@ -75,7 +76,12 @@ - (void)layoutSubviews
+      * only happen on iOS 8, or it might have been fixed another way with other
+      * code... This code prevents split view (iOS 9+) from working on iPads, so
+      * we want to avoid using it if possible. */
+-    if (!UIKit_IsSystemVersionAtLeast(9.0)) {
++    if (@available(iOS 13.0, tvOS 13.0, *)) {
++        if (self.windowScene != nil) {
++            CGRect bounds = self.windowScene.coordinateSpace.bounds;
++            if (!CGRectEqualToRect(self.frame, bounds)) self.frame = bounds;
++        }
++    } else if (!UIKit_IsSystemVersionAtLeast(9.0)) {
+         self.frame = self.screen.bounds;
+     }
+     [super layoutSubviews];
+@@ -90,7 +96,7 @@ static int SetupWindowData(_THIS, SDL_Window *window, UIWindow *uiwindow, SDL_bo
+     SDL_DisplayData *displaydata = (__bridge SDL_DisplayData *) display->driverdata;
+     SDL_uikitview *view;
+ 
+-    CGRect frame = UIKit_ComputeViewFrame(window, displaydata.uiscreen);
++    CGRect frame = uiwindow.bounds;
+     int width  = (int) frame.size.width;
+     int height = (int) frame.size.height;
+ 
+@@ -213,6 +219,7 @@ int UIKit_CreateWindow(_THIS, SDL_Window *window)
+         /* ignore the size user requested, and make a fullscreen window */
+         /* !!! FIXME: can we have a smaller view? */
+         UIWindow *uiwindow = [[SDL_uikitwindow alloc] initWithFrame:data.uiscreen.bounds];
++        SDL_UIKit_AttachWindowToScene(uiwindow);
+ 
+         /* put the window on an external display if appropriate. */
+         if (data.uiscreen != [UIScreen mainScreen]) {

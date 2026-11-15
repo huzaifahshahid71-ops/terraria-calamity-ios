@@ -1,0 +1,79 @@
+diff --git a/src/FAudio.c b/src/FAudio.c
+index a071cae..e6b38dd 100644
+--- a/src/FAudio.c
++++ b/src/FAudio.c
+@@ -759,6 +759,12 @@ uint32_t FAudio_CreateMasteringVoice(
+ 	}
+ 	audio->master->outputChannels = audio->mixFormat.Format.nChannels;
+ 	audio->master->master.inputSampleRate = audio->mixFormat.Format.nSamplesPerSec;
++	/* Terraria iOS port: default channels (0) were never resolved when device details were unavailable;
++	 * a 0-channel master mixes nothing. Use the opened device's channel count. */
++	if ((*ppMasteringVoice)->master.inputChannels == 0)
++	{
++		(*ppMasteringVoice)->master.inputChannels = audio->master->outputChannels;
++	}
+ 
+ 	/* Effect Chain Cache */
+ 	if ((*ppMasteringVoice)->master.inputChannels != (*ppMasteringVoice)->outputChannels)
+diff --git a/src/FAudio_platform_sdl2.c b/src/FAudio_platform_sdl2.c
+index d09cdcd..59d7b30 100644
+--- a/src/FAudio_platform_sdl2.c
++++ b/src/FAudio_platform_sdl2.c
+@@ -34,6 +34,17 @@
+ #error "SDL version older than 2.24.0"
+ #endif /* !SDL_VERSION_ATLEAST */
+ 
++/* Local iOS adaptation: SDL permits only one physical output device. */
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#if TARGET_OS_IPHONE
++#define FAUDIO_IOS_SHARED_DEVICE 1
++#endif
++#endif
++#ifdef FAUDIO_IOS_SHARED_DEVICE
++#include "FAudio_platform_sdl2_ios.h"
++#endif
++
+ /* Mixer Thread */
+ 
+ static void FAudio_INTERNAL_MixCallback(void *userdata, Uint8 *stream, int len)
+@@ -118,6 +129,10 @@ void FAudio_PlatformInit(
+ 	uint32_t *updateSize,
+ 	void** platformDevice
+ ) {
++#ifdef FAUDIO_IOS_SHARED_DEVICE
++    FAudioIOSInit(audio, flags, deviceIndex, mixFormat, updateSize, platformDevice);
++    return;
++#endif
+ 	SDL_AudioDeviceID device;
+ 	SDL_AudioSpec want, have;
+ 
+@@ -197,17 +212,24 @@ iosretry:
+ 
+ void FAudio_PlatformQuit(void* platformDevice)
+ {
++#ifdef FAUDIO_IOS_SHARED_DEVICE
++    FAudioIOSQuit(platformDevice);
++#else
+ 	SDL_CloseAudioDevice((SDL_AudioDeviceID) ((size_t) platformDevice));
++#endif
+ }
+ 
+ uint32_t FAudio_PlatformGetDeviceCount()
+ {
+-	uint32_t devCount = SDL_GetNumAudioDevices(0);
+-	if (devCount == 0)
++	/* Terraria iOS port: SDL cannot enumerate output devices on iOS (returns 0, or -1 which wrapped to a huge
++	 * unsigned value). Always expose "Default Device" so FAudio_GetDeviceDetails works; otherwise FNA creates a
++	 * mastering voice with 0 input channels and every engine mixes silence. */
++	int devCount = SDL_GetNumAudioDevices(0);
++	if (devCount <= 0)
+ 	{
+-		return 0;
++		return 1;
+ 	}
+-	return devCount + 1; /* Add one for "Default Device" */
++	return (uint32_t) devCount + 1; /* Add one for "Default Device" */
+ }
+ 
+ void FAudio_UTF8_To_UTF16(const char *src, uint16_t *dst, size_t len);

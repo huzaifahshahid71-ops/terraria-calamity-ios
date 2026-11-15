@@ -1,0 +1,6 @@
+<Project>
+  <!-- Optional local build mode: avoid the external MSBuild task-host pipe.
+       Compiler/linker inputs and AOT settings remain unchanged. -->
+  <UsingTask TaskName="ComputeManagedAssemblies" AssemblyFile="$(MSBuildThisFileDirectory)../toolchain/nuget/microsoft.net.illink.tasks/10.0.15/tools/net/ILLink.Tasks.dll" Override="true" />
+  <UsingTask TaskName="ILLink" AssemblyFile="$(MSBuildThisFileDirectory)../toolchain/nuget/microsoft.net.illink.tasks/10.0.15/tools/net/ILLink.Tasks.dll" Override="true" />
+</Project>

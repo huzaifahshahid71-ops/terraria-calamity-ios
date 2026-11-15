@@ -1,0 +1,2 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework><AssemblyName>ProbePayload</AssemblyName></PropertyGroup>
+<ItemGroup><Reference Include="../../inputs/loader-libraries/MonoMod.Utils.dll" Private="false"/><Reference Include="../../inputs/loader-libraries/Mono.Cecil.dll" Private="false"/></ItemGroup></Project>

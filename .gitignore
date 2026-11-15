@@ -1,0 +1,30 @@
+# User-owned inputs, toolchains and generated output
+/inputs
+/build/
+/downloads/
+/toolchain
+/metadata/
+**/bin/
+**/obj/
+**/__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+*.ipa
+*.tmod
+*.dll
+*.exe
+*.dylib
+*.aotdata
+*.xnb
+*.wld
+*.wld.bak
+*.plr
+*.plr.bak
+*.p12
+*.mobileprovision
+*.ips
+*.log
+# Never track generated game-derived icon bytes
+**/generated-icons/

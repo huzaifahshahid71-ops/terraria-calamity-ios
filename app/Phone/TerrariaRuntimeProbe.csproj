@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+<PropertyGroup><TargetFramework>net10.0-ios</TargetFramework><OutputType>Exe</OutputType><Nullable>enable</Nullable><ImplicitUsings>true</ImplicitUsings><SupportedOSPlatformVersion>15.0</SupportedOSPlatformVersion><RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
+<!-- v12 mixed mode: AOT-compile every app assembly (incl. woven tModLoader + deps); interpreter only for runtime-generated code (DMD IL edits) and assemblies loaded from bytes. -->
+<UseInterpreter>true</UseInterpreter><MtouchInterpreter>all,-tModLoader,-ManagedHooks,-FNA,-ReLogic,-System.Private.CoreLib,-MonoMod.Utils,-Mono.Cecil,-CalamityMod,-CalamityModMusic</MtouchInterpreter><MtouchUseLlvm>true</MtouchUseLlvm><_IsDedupEnabled>false</_IsDedupEnabled>
+<MtouchLink>None</MtouchLink><TrimMode>copy</TrimMode><EnableCodeSigning>false</EnableCodeSigning><BuildIpa>true</BuildIpa><ApplicationId>com.example.terraria.runtimeprobe</ApplicationId>
+<NoWarn>$(NoWarn);MSB3277;NU1603;IL2026;IL2075;IL2104;IL3050</NoWarn></PropertyGroup>
+<ItemGroup><Compile Include="../Shared/Checks.cs" Link="Checks.cs"/><Compile Include="../Shared/CalamityHooks.cs" Link="CalamityHooks.cs"/><Reference Include="../../inputs/loader-libraries/*.dll"/><EmbeddedResource Include="../Payload/bin/Release/net8.0/ProbePayload.dll" LogicalName="ProbePayload.dll"/></ItemGroup>
+<!-- woven + iOS-patched tModLoader, TerrariaHooks, ManagedHooks and the managed dependency set as real app assemblies (AOT compiled) -->
+<ItemGroup><Reference Include="../../build/tml-bundle/*.dll" Private="true"/></ItemGroup>
+<!-- v13: byte-identical copies of the mod assemblies inside the .tmod files, AOT compiled; tML loads them via IosSupport.LoadModAssembly -->
+<ItemGroup><Reference Include="../../inputs/mods/CalamityMod/CalamityMod.dll" Private="true"/><Reference Include="../../inputs/mods/CalamityModMusic/CalamityModMusic.dll" Private="true"/></ItemGroup>
+<!-- v15: FNA native dependencies for iOS (tools/build-natives-ios.sh): SDL2 2.28.2, FNA3D 23.10, FAudio 22.09, Theorafile -->
+<ItemGroup>
+<NativeReference Include="../../build/natives-ios/SDL2.framework"><Kind>Framework</Kind><SmartLink>false</SmartLink></NativeReference>
+<NativeReference Include="../../build/natives-ios/FNA3D.framework"><Kind>Framework</Kind><SmartLink>false</SmartLink></NativeReference>
+<NativeReference Include="../../build/natives-ios/FAudio.framework"><Kind>Framework</Kind><SmartLink>false</SmartLink></NativeReference>
+<NativeReference Include="../../build/natives-ios/libtheorafile.framework"><Kind>Framework</Kind><SmartLink>false</SmartLink></NativeReference>
+</ItemGroup>
+<!-- Full, private game bundle: owned vanilla assets with exact tML compatibility overlay. -->
+<ItemGroup>
+<BundleResource Include="../../build/game-assets/Content/**/*"><LogicalName>Content/%(RecursiveDir)%(Filename)%(Extension)</LogicalName></BundleResource>
+<BundleResource Include="../../build/game-assets/Mods/*"><LogicalName>BundledMods/%(Filename)%(Extension)</LogicalName></BundleResource>
+</ItemGroup>
+<ItemGroup><BundleResource Include="LCAppInfo.plist"><LogicalName>LCAppInfo.plist</LogicalName></BundleResource></ItemGroup>
+</Project>

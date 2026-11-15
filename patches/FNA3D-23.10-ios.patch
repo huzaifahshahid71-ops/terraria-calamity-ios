@@ -1,0 +1,60 @@
+diff --git a/src/FNA3D.c b/src/FNA3D.c
+index ceafabb..ab5bf13 100644
+--- a/src/FNA3D.c
++++ b/src/FNA3D.c
+@@ -206,6 +206,45 @@ void FNA3D_DestroyDevice(FNA3D_Device *device)
+ 
+ /* Presentation */
+ 
++#ifdef __APPLE__
++/* Terraria iOS port: frame counter + optional frame cap shared by every driver (OpenGL ES and Vulkan/MoltenVK).
++ * The cap sleeps before presenting, so a 30/60 FPS cap idles the CPU and reduces heat. 0 = uncapped. */
++#include <mach/mach_time.h>
++#include <time.h>
++static volatile uint64_t TP_PresentCount = 0;
++static volatile int TP_FrameCap = 0;
++static uint64_t TP_LastPresent = 0;
++static double TP_LastFrameMs = 0.0;
++FNA3DAPI uint64_t FNA3D_TP_GetPresentCount(void) { return TP_PresentCount; }
++FNA3DAPI double FNA3D_TP_GetLastFrameMs(void) { return TP_LastFrameMs; }
++FNA3DAPI void FNA3D_TP_SetFrameCap(int fps) { TP_FrameCap = (fps > 0 && fps <= 240) ? fps : 0; }
++static double TP_NowSeconds(void)
++{
++	static mach_timebase_info_data_t tb;
++	if (tb.denom == 0) mach_timebase_info(&tb);
++	return (double) mach_absolute_time() * tb.numer / tb.denom / 1e9;
++}
++static void TP_BeforePresent(void)
++{
++	int cap = TP_FrameCap;
++	if (cap > 0 && TP_LastPresent != 0)
++	{
++		double target = 1.0 / cap, last = (double) TP_LastPresent / 1e9, wait = target - (TP_NowSeconds() - last);
++		if (wait > 0.0005)
++		{
++			struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = (long) ((wait - 0.0003) * 1e9);
++			nanosleep(&ts, NULL);
++		}
++	}
++	{
++		double now = TP_NowSeconds();
++		if (TP_LastPresent != 0) TP_LastFrameMs = (now - (double) TP_LastPresent / 1e9) * 1000.0;
++		TP_LastPresent = (uint64_t) (now * 1e9);
++	}
++	TP_PresentCount++;
++}
++#endif
++
+ void FNA3D_SwapBuffers(
+ 	FNA3D_Device *device,
+ 	FNA3D_Rect *sourceRectangle,
+@@ -217,6 +256,9 @@ void FNA3D_SwapBuffers(
+ 	{
+ 		return;
+ 	}
++#ifdef __APPLE__
++	TP_BeforePresent();
++#endif
+ 	device->SwapBuffers(
+ 		device->driverData,
+ 		sourceRectangle,
